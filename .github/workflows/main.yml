@@ -14,18 +14,97 @@ on:
   workflow_dispatch:
 
 jobs:
-  build_image:
+  setup_image:
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+#        variant: [ "", "lite", "full" ] # "" is the desktop variant without recommended software
+#        architecture: [ "armhf", "arm64" ]
+        variant: [ "lite" ]
+        architecture: [ "arm64" ]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Run Script
-        run: sudo ./setup.sh raspberrypi pi raspberry nobackup
+      - name: Setup Environment Variables
+        # language=sh
+        run: |
+          LINK_VARIANT="_${{ matrix.architecture }}"
+          
+          if [[ ! -z "${{ matrix.variant }}" ]]; then
+            LINK_VARIANT="_${{ matrix.variant }}${LINK_VARIANT}"
+          fi
+          
+          echo "GITHUB_LINK_VARIANT=$LINK_VARIANT" >>  $GITHUB_ENV
+
+      - name: Install Dependencies
+        # language=sh
+        run: sudo apt update && sudo apt-get install -y qemu-utils parted expect udev fdisk qemu qemu-user-static binfmt-support
+
+      - name: Get Latest Release
+        # language=sh
+        run: |
+          echo "GITHUB_LATEST_RELEASE=$(curl -s https://downloads.raspberrypi.org/raspios$GITHUB_LINK_VARIANT/images/ | grep -Po '(?<=href=")[^"]*' | tail -n 1)" >> $GITHUB_ENV
+
+      - name: Get Filename
+        # language=sh
+        run: echo "GITHUB_FILENAME=$(curl -s https://downloads.raspberrypi.org/raspios$GITHUB_LINK_VARIANT/images/$GITHUB_LATEST_RELEASE | grep -Po '(?<=href=")[^"]*' | grep 'xz' | head -n 1 | xargs -I OUTPUT basename OUTPUT .xz)" >> $GITHUB_ENV
+
+      - name: Downlad Image
+        # language=sh
+        run: curl -s https://downloads.raspberrypi.org/raspios$GITHUB_LINK_VARIANT/images/$GITHUB_LATEST_RELEASE$GITHUB_FILENAME.xz -o $GITHUB_FILENAME.xz
+
+      - name: Decompress Image
+        # language=sh
+        run: xz -d $GITHUB_FILENAME.xz
+
+      - name: Expand Image
+        # language=sh
+        run: |
+          qemu-img resize "$GITHUB_FILENAME" "8G"
+          parted -s "$GITHUB_FILENAME" resizepart 2 100%
+
+      - name: Mount Root Partition
+        # language=sh
+        run: |
+          OFFSET=$(fdisk --bytes -lo Start,Size "$GITHUB_FILENAME" | awk '/^[^ ]*1/{ print $1*512 }' | tail -n 1)
+          SIZE_LIMIT=$(fdisk --bytes -lo Start,Size "$GITHUB_FILENAME" | awk '/^[^ ]*1/{ print $2*512 }' | tail -n 1)
+          mkdir root
+          
+          echo $(fdisk -lo Start,Size "$GITHUB_FILENAME")
+          
+          echo sudo mount -o loop,offset="$OFFSET",sizelimit="$SIZE_LIMIT" "$GITHUB_FILENAME" root
+          sudo mount -o loop,offset="$OFFSET",sizelimit="$SIZE_LIMIT" "$GITHUB_FILENAME" root
+
+      - name: Mount Boot Partition
+        # language=sh
+        run: |
+          OFFSET=$(fdisk --bytes -lo Start,Size "$GITHUB_FILENAME" | awk '/^[^ ]*1/{ print $1*512 }' | head -n 1)
+          SIZE_LIMIT=$(fdisk --bytes -lo Start,Size "$GITHUB_FILENAME" | awk '/^[^ ]*1/{ print $2*512 }' | head -n 1)
+          mkdir -p root/boot
+          echo sudo mount -o loop,offset="$OFFSET",sizelimit="$SIZE_LIMIT" "$GITHUB_FILENAME" root/boot
+          sudo mount -o loop,offset="$OFFSET",sizelimit="$SIZE_LIMIT" "$GITHUB_FILENAME" root/boot
+
+      - name: Copy configs into chroot
+        # language=sh
+        run: cp -r config/* root/tmp/
+
+      - name: Run Install Script
+        run: chroot root /tmp/create-image
+
+      - name: Unmount Paritions
+        # language=sh
+        run: |
+          sync
+          
+          umount root/boot
+          umount root
 
       - uses: actions/upload-artifact@v3
         name: Upload Generated Image
         with:
-          name: raspios.img.xz
-          path: ./raspios.img.xz
+          name: ${{ env.GITHUB_FILENAME }}
+          path: ./${{ env.GITHUB_FILENAME }}
           if-no-files-found: error

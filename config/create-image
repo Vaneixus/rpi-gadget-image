@@ -1,0 +1,119 @@
+#!/usr/bin/bash
+
+set -o pipefail
+
+##############################
+# UPDATE PACKAGES REPOSITORY #
+##############################
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update
+
+####################
+# INSTALL PACKAGES #
+####################
+apt-get -y upgrade
+apt-get -y install dnsmasq network-manager bridge-utils debian-keyring debian-archive-keyring apt-transport-https caddy realvnc-vnc-server umtp-responder
+apt-get install --no-install-recommends -y tigervnc-standalone-server xfonts-scalable xfonts-100dpi xfonts-75dpi novnc
+apt-get clean
+
+###########################
+# ACTIVATE NETWORKMANAGER #
+###########################
+systemctl enable --now NetworkManager
+
+
+#################
+# INSTALL CODER #
+#################
+curl -fsSL https://raw.githubusercontent.com/coder/code-server/main/install.sh | sh
+systemctl enable code-server@1000
+sudo sed -i '/^\[Service\]/a AmbientCapabilities=CAP_NET_BIND_SERVICE' /lib/systemd/system/code-server@.service
+sudo sed -i 's/code-server/code-server --auth none ---bind-addr 0.0.0.0 --cert none/' /lib/systemd/system/code-server@.service
+
+
+###################
+# CONFIGURE NoVNC #
+###################
+#cp /tmp/lib/systemd/system/novnc.service /lib/systemd/system/novnc.service
+#cp /tmp/usr/share/novnc/index.html /usr/share/novnc/index.html
+#rm /usr/share/novnc/vnc_lite.html
+#rm /usr/share/novnc/vnc.html
+#ln -s /usr/share/novnc/index.html /usr/share/novnc/vnc.html
+#systemctl enable novnc.service
+
+###################
+# CONFIGURE CADDY #
+###################
+cp /tmp/etc/caddy/Caddyfile /etc/caddy/Caddyfile
+systemctl reload caddy
+
+########################
+# SETUP NETWORK BRIDGE #
+########################
+brctl addbr br0
+
+########################
+# CONFIGURE DNS SERVER #
+########################
+cp /tmp/etc/dnsmasq.d/usb0 /etc/dnsmasq.d/usb0
+cp /tmp/etc/network/interfaces.d/usb0 /etc/network/interfaces.d/usb0
+
+
+########################
+# CONFIGURE USB GADGET #
+########################
+cp /tmp/usr/local/sbin/multigadget /usr/local/sbin/multigadget
+chmod +x /usr/local/sbin/multigadget
+cp /tmp/lib/systemd/system/multigadget.service /lib/systemd/system/multigadget.service
+systemctl enable multigadget.service
+
+
+########################
+# CONFIGURE MTP GADGET #
+########################
+cp /tmp/etc/umtprd/umtprd.conf /etc/umtprd/umtprd.conf
+
+
+####################
+# CONFIGURE KERNEL #
+####################
+echo dtoverlay=dwc2 >> /boot/config.txt
+touch /boot/ssh
+echo dwc2 >> /etc/modules
+echo libcomposite >> /etc/modules
+
+
+
+##################
+# CONFIGURE DHCP #
+##################
+echo denyinterfaces usb0 br0 >> /etc/dhcpcd.conf
+
+##########################
+# ENABLE NETWORK MANAGER #
+##########################
+raspi-config nonint do_netconf 2
+
+###################
+# CONFIGURE AVAHI #
+###################
+sed -i 's/#allow-interfaces=eth0/allow-interfaces=br0/' /etc/avahi/avahi-daemon.conf
+
+##############
+# ENABLE SSH #
+##############
+raspi-config nonint do_ssh 0
+
+############################
+# CONFIGURE RealVNC Server #
+############################
+#raspi-config nonint do_vnc 0
+
+#############################
+# CONFIGURE TigerVNC Server #
+#############################
+#sed -i \"s/\\\[XDMCPServer\\\]/\\\[XDMCPServer\\\]\\nenabled=true\\nport=177/\" /etc/lightdm/lightdm.conf
+#cp /tmp/lib/systemd/system/tigervnc@.service /lib/systemd/system/tigervnc@.service
+#cp /lib/systemd/system/tigervnc.socket /lib/systemd/system/tigervnc.socket
+#systemctl enable tigervnc.socket
